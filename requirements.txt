@@ -1,0 +1,7 @@
+bs4
+fpdf
+pillow
+cloudscraper
+flask
+reportlab
+flask-cors
