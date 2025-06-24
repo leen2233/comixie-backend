@@ -5,3 +5,6 @@ cloudscraper
 flask
 reportlab
 flask-cors
+pymongo
+redis[hiredis]
+python_dotenv

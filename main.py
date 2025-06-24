@@ -1,19 +1,33 @@
 import io
+import json
+import os
 import re
+from dataclasses import asdict
 from enum import Enum
 
 import cloudscraper
+import redis
 from bs4 import BeautifulSoup as BS
+from dotenv import load_dotenv
 from flask import Flask, jsonify, request, send_file
 from flask_cors import CORS
 from PIL import Image
 from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen import canvas
 
+import db
+
+load_dotenv()
+
 app = Flask(__name__)
 CORS(app)
 
 scraper = cloudscraper.create_scraper()
+r = redis.Redis(
+    host=os.getenv("REDIS_HOST", ""),
+    port=int(os.getenv("REDIS_PORT", "6379")),
+    db=0
+)
 
 class Status(Enum):
     DOWNLOADING = "Downloading"
@@ -70,9 +84,12 @@ def search_comics():
 
 @app.route('/api/details/<path:slug>', methods=['GET'])
 def get_comic_details(slug):
-    url = f"https://readallcomics.com/category/{slug}/"
+    item = db.comics.get(slug)
+    if item:
+        return jsonify(asdict(item))
 
     try:
+        url = f"https://readallcomics.com/category/{slug}/"
         response = scraper.get(url)
         if response.status_code != 200:
             return jsonify({"error": "comic not found"}), response.status_code
@@ -112,29 +129,35 @@ def get_comic_details(slug):
             title = title_element.text
 
         if image_element:
-            image = image_element.get("src")
+            image = str(image_element.get("src"))
 
         match = re.search(r'</span><br/>(.*?)<br/>', description_element, re.DOTALL)
         if match:
             description = match.group(1).strip()
 
-        return jsonify({
-            "title": title,
-            "genres": genres,
-            "publisher": publisher,
-            "description": description,
-            "chapters": chapters,
-            "image": image
-        })
+        comic = db.Comic(
+            slug=slug,
+            title=title,
+            genres=genres,
+            publisher=publisher,
+            description=description,
+            image=image,
+            chapters=chapters
+        )
+        db.comics.create(comic)
+        return jsonify(asdict(comic))
 
     except Exception as e:
         return jsonify({'error': f'Failed to get details: {str(e)}'}), 500
 
 @app.route('/api/read/<path:chapter_slug>', methods=['GET'])
 def read_chapter(chapter_slug):
-    chapter_url = f"https://readallcomics.com/{chapter_slug}/"
+    item = db.chapters.get(chapter_slug)
+    if item:
+        return jsonify(asdict(item))
 
     try:
+        chapter_url = f"https://readallcomics.com/{chapter_slug}/"
         base = scraper.get(chapter_url)
         soup = BS(base.content, "html.parser")
         pages = soup.select("center p img")
@@ -146,12 +169,9 @@ def read_chapter(chapter_slug):
                 raise AttributeError("Image can't have more than one source")
             urls.append(source)
 
-        return jsonify({
-            "chapter_slug": chapter_slug,
-            "chapter_url": chapter_url,
-            "total_pages": len(urls),
-            "image_urls": urls
-        })
+        chapter = db.Chapter(slug=chapter_slug, total_pages=len(urls), image_urls=urls)
+        db.chapters.create(chapter)
+        return jsonify(asdict(chapter))
 
     except Exception as e:
         return jsonify({'error': f'Failed to read chapter: {str(e)}'}), 500
@@ -222,9 +242,12 @@ def export_pdf(chapter_slug):
 @app.route('/api/home', methods=['GET'])
 def home_page():
     page = request.args.get('page', 1, type=int)
-    url = f"https://readallcomics.com/page/{page}/"
+    data = r.get(f"home_{page}")
+    if data:
+        return jsonify(json.loads(data)) # type: ignore
 
     try:
+        url = f"https://readallcomics.com/page/{page}/"
         response = scraper.get(url)
         soup = BS(response.content, "html.parser")
         divs = soup.find_all('div', {'id': lambda x: x and x.startswith('post-'), 'class': lambda x: x and 'post-' in x}) # type: ignore
@@ -249,11 +272,14 @@ def home_page():
             except Exception:
                 continue
 
-        return jsonify({
+        data = {
             'page': page,
             'total_comics': len(comics),
             'comics': comics
-        })
+        }
+        r.setex(f"home_{page}", 21600, json.dumps(data)) # 21600 seconds = 6 hours cache
+
+        return jsonify(data)
 
     except Exception as e:
         return jsonify({'error': f'Failed to get home page: {str(e)}'}), 500
