@@ -4,7 +4,7 @@ import os
 import re
 from dataclasses import asdict
 from enum import Enum
-
+import sqlite3
 import cloudscraper
 import redis
 from bs4 import BeautifulSoup as BS
@@ -28,6 +28,10 @@ r = redis.Redis(
     port=int(os.getenv("REDIS_PORT", "6379")),
     db=0
 )
+
+DATABASE_PATH = os.getenv("DATABASE_PATH")
+if not DATABASE_PATH:
+    raise Exception("Please set DATABASE_PATH at .env")
 
 class Status(Enum):
     DOWNLOADING = "Downloading"
@@ -81,6 +85,60 @@ def search_comics():
             'total_results': 0,
             'results': []
         }), 500
+
+
+@app.route('/api/genres', methods=['GET'])
+def get_genres():
+    sql = "SELECT * FROM genres"
+
+    with sqlite3.connect(DATABASE_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        db = conn.cursor()
+        rows = db.execute(sql).fetchall()[:20]
+
+        results = [{"id": row[0], "name": row[1]} for row in rows]
+        return jsonify(results)
+    return jsonify({"error": "Server Error"}), 500
+
+
+@app.route('/api/genre/<int:genre_id>/comics', methods=['GET'])
+def get_comics_by_genre(genre_id):
+    page = int(request.args.get('page', 1))
+    per_page = int(request.args.get('per_page', 10))
+    offset = (page - 1) * per_page
+
+    with sqlite3.connect(DATABASE_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        db = conn.cursor()
+
+        total = db.execute("""
+            SELECT COUNT(*) FROM comics c
+            JOIN comic_genres cg ON cg.comic_id = c.id
+            WHERE cg.genre_id = ?
+        """, (genre_id,)).fetchone()[0]
+
+        comics = db.execute("""
+            SELECT c.* FROM comics c
+            JOIN comic_genres cg ON cg.comic_id = c.id
+            WHERE cg.genre_id = ?
+            LIMIT ? OFFSET ?
+        """, (genre_id, per_page, offset)).fetchall()
+
+        return jsonify({
+            'page': page,
+            'total_results': total,
+            'results': [
+                {
+                    'id': comic['id'],
+                    'slug': comic['slug'],
+                    'title': comic['title'],
+                    'url': comic['url'],
+                    'description': comic['description'],
+                    'publisher': comic['publisher']
+                } for comic in comics
+            ]
+        })
+
 
 @app.route('/api/details/<path:slug>', methods=['GET'])
 def get_comic_details(slug):
