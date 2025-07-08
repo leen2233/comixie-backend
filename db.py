@@ -17,7 +17,7 @@ db = client.comixie
 @dataclass
 class Comic:
     slug: str
-    chapters: List[dict]
+    url: str
     _id: Optional[str|ObjectId] = None
     genres: Optional[List[str]] = None
     title: Optional[str] = None
@@ -29,9 +29,11 @@ class Comic:
 @dataclass
 class Chapter:
     slug: str
-    total_pages: int
-    image_urls: List[str]
+    comic_slug: str
+    name: str
+    url: str
     _id: Optional[str|ObjectId] = None
+    images: Optional[List] = None
 
 
 class ComicManager:
@@ -71,5 +73,10 @@ class ChapterManager:
         item = db.chapters.insert_one(data)
         return item
 
+    def update(self, slug: str, images: list):
+        db.chapters.update_one({'slug': slug}, {'$set': {'images': images}})
+        return True
+
 comics = ComicManager()
 chapters = ChapterManager()
+genres = db.genres

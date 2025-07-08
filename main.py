@@ -6,6 +6,7 @@ from dataclasses import asdict
 from enum import Enum
 import sqlite3
 import cloudscraper
+import pymongo
 import redis
 from bs4 import BeautifulSoup as BS
 from dotenv import load_dotenv
@@ -29,7 +30,7 @@ r = redis.Redis(
     db=0
 )
 
-DATABASE_PATH = os.getenv("DATABASE_PATH")
+DATABASE_PATH = os.getenv("DATABASE_PATH", "")
 if not DATABASE_PATH:
     raise Exception("Please set DATABASE_PATH at .env")
 
@@ -89,62 +90,50 @@ def search_comics():
 
 @app.route('/api/genres', methods=['GET'])
 def get_genres():
-    sql = "SELECT * FROM genres"
-
-    with sqlite3.connect(DATABASE_PATH) as conn:
-        conn.row_factory = sqlite3.Row
-        db = conn.cursor()
-        rows = db.execute(sql).fetchall()[:20]
-
-        results = [{"id": row[0], "name": row[1]} for row in rows]
-        return jsonify(results)
-    return jsonify({"error": "Server Error"}), 500
+    genres = db.genres.find().limit(20)
+    genres = [genre["name"] for genre in genres]
+    return jsonify(genres)
 
 
-@app.route('/api/genre/<int:genre_id>/comics', methods=['GET'])
-def get_comics_by_genre(genre_id):
+@app.route('/api/genre/<string:genre_name>/comics', methods=['GET'])
+def get_comics_by_genre(genre_name):
     page = int(request.args.get('page', 1))
     per_page = int(request.args.get('per_page', 10))
-    offset = (page - 1) * per_page
+    skip = (page - 1) * per_page
 
-    with sqlite3.connect(DATABASE_PATH) as conn:
-        conn.row_factory = sqlite3.Row
-        db = conn.cursor()
+    comics_col = db.db.comics
+    query = { 'genres': genre_name }
 
-        total = db.execute("""
-            SELECT COUNT(*) FROM comics c
-            JOIN comic_genres cg ON cg.comic_id = c.id
-            WHERE cg.genre_id = ?
-        """, (genre_id,)).fetchone()[0]
+    total = comics_col.count_documents(query)
+    comics = comics_col.find(query).skip(skip).limit(per_page)
 
-        comics = db.execute("""
-            SELECT c.* FROM comics c
-            JOIN comic_genres cg ON cg.comic_id = c.id
-            WHERE cg.genre_id = ?
-            LIMIT ? OFFSET ?
-        """, (genre_id, per_page, offset)).fetchall()
-
-        return jsonify({
-            'page': page,
-            'total_results': total,
-            'results': [
-                {
-                    'id': comic['id'],
-                    'slug': comic['slug'],
-                    'title': comic['title'],
-                    'url': comic['url'],
-                    'description': comic['description'],
-                    'publisher': comic['publisher']
-                } for comic in comics
-            ]
-        })
+    return jsonify({
+        'page': page,
+        'total_results': total,
+        'results': [
+            {
+                'slug': comic['slug'],
+                'title': comic['title'],
+                'url': comic['url'],
+                'description': comic['description'],
+                'publisher': comic['publisher'],
+                'image': comic['image']
+            } for comic in comics
+        ]
+    })
 
 
 @app.route('/api/details/<path:slug>', methods=['GET'])
 def get_comic_details(slug):
     item = db.comics.get(slug)
     if item:
-        return jsonify(asdict(item))
+        chapters = list(db.db.chapters.find({'comic_slug': item.slug}))
+        for chapter in chapters:
+            chapter.pop('_id')
+
+        data = asdict(item)
+        data['chapters'] = chapters
+        return jsonify(data)
 
     try:
         url = f"https://readallcomics.com/category/{slug}/"
@@ -200,7 +189,7 @@ def get_comic_details(slug):
             publisher=publisher,
             description=description,
             image=image,
-            chapters=chapters
+            url=url
         )
         db.comics.create(comic)
         return jsonify(asdict(comic))
@@ -211,7 +200,7 @@ def get_comic_details(slug):
 @app.route('/api/read/<path:chapter_slug>', methods=['GET'])
 def read_chapter(chapter_slug):
     item = db.chapters.get(chapter_slug)
-    if item:
+    if item and item.images:
         return jsonify(asdict(item))
 
     try:
@@ -227,9 +216,12 @@ def read_chapter(chapter_slug):
                 raise AttributeError("Image can't have more than one source")
             urls.append(source)
 
-        chapter = db.Chapter(slug=chapter_slug, total_pages=len(urls), image_urls=urls)
-        db.chapters.create(chapter)
-        return jsonify(asdict(chapter))
+        db.chapters.update(chapter_slug, urls)
+        chapter = db.chapters.get(chapter_slug)
+        if chapter:
+            return jsonify(asdict(chapter))
+        else:
+            return jsonify({'error': 'Not Found'}), 404
 
     except Exception as e:
         return jsonify({'error': f'Failed to read chapter: {str(e)}'}), 500
